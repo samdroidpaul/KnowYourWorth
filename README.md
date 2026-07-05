@@ -79,7 +79,7 @@ Build order matters — later steps depend on values produced by earlier ones:
 
 ## Licence
 
-TODO: pick one. MIT or Apache 2.0 are safe defaults.
+ MIT 
 
 ## Credit
 
