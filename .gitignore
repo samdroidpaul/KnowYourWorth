@@ -1,0 +1,44 @@
+# Env files (may contain project IDs, agent IDs, API keys)
+.env
+.env.local
+.env.*.local
+!.env.example
+!.env.local.example
+
+# Google Cloud credentials — should never be in a repo
+*.json
+!package.json
+!package-lock.json
+!tsconfig.json
+!next.config.json
+gcloud-service-key*
+*credentials*
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+venv/
+.venv/
+
+# Node
+node_modules/
+.next/
+out/
+build/
+dist/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local test artefacts
+*.log
+token.txt
