@@ -5,10 +5,6 @@ import { GoogleAuth } from "google-auth-library";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-// The agent can sit silent for minutes while its BigQuery data agent runs.
-// Node's default fetch aborts a body that goes idle for 5 minutes, which
-// kills the SSE stream mid-run — so the upstream call uses undici with the
-// idle timeouts disabled.
 const streamAgent = new Agent({ headersTimeout: 0, bodyTimeout: 0 });
 
 type ChatBody = {
@@ -24,8 +20,6 @@ function env() {
   return { base: base.replace(/\/$/, ""), app };
 }
 
-// Mint ID tokens ourselves so we can keep using undici for the long-lived
-// SSE stream. The audience must be the orchestrator's base URL — no path.
 const auth = new GoogleAuth();
 let idTokenProviderPromise: ReturnType<GoogleAuth["getIdTokenClient"]> | null = null;
 async function getIdToken(audience: string): Promise<string> {
@@ -54,11 +48,6 @@ function sseError(message: string): Response {
   });
 }
 
-/**
- * Stream the ADK /run_sse response straight back to the browser. We re-emit
- * the bytes as-is — the client does the SSE line parsing — so partial frames
- * and tool-call events are preserved exactly.
- */
 export async function POST(req: NextRequest) {
   let body: ChatBody;
   try {

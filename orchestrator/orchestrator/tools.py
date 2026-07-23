@@ -3,14 +3,19 @@ Tools for the orchestrator.
 
 Knowledge (the ONLY source of role/salary facts):
   - query_salary_knowledge : ask the published BigQuery data agent anything.
-  - get_role_examples      : cached seed list of roles (speed win).
+  - get_role_examples      : cached seed list of roles (speed win, avoids re-querying).
+
+  Every call to either tool is written to Firestore's audit_log collection (question asked,
+  answer received, timestamped, scoped to the session) — see memory.log_tool_call. That's
+  the record a finalized report can be checked against afterward: it's what makes "the agent
+  only states what the data agent returned" a checkable fact for any real conversation,
+  not just a claim in the prompt.
 
 Per-person session memory (Firestore-backed):
   - note_person     : accumulate a fact about a person being compiled.
   - recall_person   : read back what's been gathered about a person.
   - list_people     : list everyone in progress in this conversation.
-  - finalize_person : save the final report, then clear that person's
-                      working memory.
+  - finalize_person : save the final report, then clear that person's working memory.
 
 Verified against google-cloud-geminidataanalytics 0.13.1.
 """
@@ -72,47 +77,58 @@ def _session_id(tool_context: ToolContext) -> str:
     return getattr(sess, "id", None) or tool_context.invocation_id
 
 
-# --------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
 # Knowledge tools
-# --------------------------------------------------------------------------
-def query_salary_knowledge(question: str) -> str:
-    """Look up job roles, responsibilities, and AU/NZ salary ranges from the
-    published BigQuery data agent. This is the ONLY trustworthy source of role
-    and salary facts — never answer salary or role questions without it.
+# ----------------------------------------------------------------------------
+def query_salary_knowledge(question: str, tool_context: ToolContext) -> str:
+    """Look up job roles, responsibilities, and AU/NZ salary ranges from the company's
+    published BigQuery data agent. This is the ONLY trustworthy source of role and salary
+    facts — never answer salary or role questions without it.
 
     Args:
-        question: a plain-language question for the data agent.
+        question: a plain-language question for the data agent, e.g.
+            "What is the salary range for Data Analyst in NZ?".
     Returns:
-        The data agent's answer as text, possibly with a "DATA:" line of
-        JSON rows.
+        The data agent's answer as text, possibly with a "DATA:" line of JSON rows.
     """
-    return _ask_data_agent(question)
-
-
-def get_role_examples(tool_context: ToolContext) -> str:
-    """Return a cached list of common roles and their typical tasks, to
-    suggest to a user who is unsure of their title. Uses a Firestore cache so
-    the data agent is queried at most once every few hours instead of every
-    conversation.
-    """
-    cached = memory.cache_get("role_seed")
-    if cached:
-        return cached
-    answer = _ask_data_agent(
-        "List the most common job roles and a short description of their "
-        "typical day-to-day tasks. Keep it concise."
+    answer = _ask_data_agent(question)
+    memory.log_tool_call(
+        _session_id(tool_context), "query_salary_knowledge", question, answer
     )
-    memory.cache_set("role_seed", answer)
     return answer
 
 
-# --------------------------------------------------------------------------
+def get_role_examples(tool_context: ToolContext) -> str:
+    """Return a cached list of common roles and their typical tasks, to suggest to a user
+    who is unsure of their title. Uses a Firestore cache so the data agent is queried at
+    most once every few hours instead of every conversation.
+    """
+    cached = memory.cache_get("role_seed")
+    if cached:
+        memory.log_tool_call(
+            _session_id(tool_context), "get_role_examples (cached)", "(role seed list)", cached
+        )
+        return cached
+    question = (
+        "List the most common job roles and a short description of their typical "
+        "day-to-day tasks. Keep it concise."
+    )
+    answer = _ask_data_agent(question)
+    memory.cache_set("role_seed", answer)
+    memory.log_tool_call(_session_id(tool_context), "get_role_examples", question, answer)
+    return answer
+
+
+# ----------------------------------------------------------------------------
 # Per-person session memory tools
-# --------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
 def note_person(person_label: str, note: str, tool_context: ToolContext) -> str:
-    """Save a fact learned about a specific person while compiling their
-    profile. Call this each time you learn something (a task, tool, seniority
-    detail, hours split, etc.).
+    """Save a fact learned about a specific person while compiling their profile. Call this
+    each time you learn something (a task, tool, seniority detail, hours split, etc.).
+
+    Args:
+        person_label: a name or label identifying the person (e.g. "you", "Sam", "Person 2").
+        note: the single fact to remember, in plain language.
     """
     memory.add_note(_session_id(tool_context), person_label, note)
     return f"Noted for {person_label}."
@@ -139,9 +155,13 @@ def list_people(tool_context: ToolContext) -> str:
 
 
 def finalize_person(person_label: str, report_json: str, tool_context: ToolContext) -> str:
-    """Record the final salary report for a person (the significant output),
-    then CLEAR that person's working memory. Call this once you have produced
-    the final result for them.
+    """Record the final salary report for a person (the significant output), then CLEAR that
+    person's working memory. Call this once you have produced the final result for them.
+
+    Args:
+        person_label: the person the report is for.
+        report_json: the final result as a JSON string
+            (e.g. '{"currency":"NZD","roles":[{"title":"...","pct":40,"low":...,"high":...}]}').
     """
     try:
         report = json.loads(report_json)

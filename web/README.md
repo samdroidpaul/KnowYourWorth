@@ -2,18 +2,15 @@
 
 Next.js 14 (App Router) app that hosts the chat surface, streams the
 conversation from the orchestrator, and renders the final JSON block as a
-salary table with a CSV download.
+salary table with a CSV/HTML report download. This is the complete app as
+deployed — chat UI, video backdrop, theming, GA4 analytics, OG share image,
+and the optional AI-generated report banner — not a stripped-down reference.
 
-The full UI is not included in this section — only the two API route
-handlers that do the work most people get wrong. Those two files (`session`
-and `chat`) are what actually make the whole architecture safe. Everything
-else you can build to taste.
-
-## Why the routes matter more than the UI
+## Why the API routes matter
 
 The browser must **never** call the orchestrator directly. It's locked down
 to reject anonymous traffic. Instead, the browser calls **your own Next.js
-origin**, and the two route handlers below run server-side, mint a
+origin**, and `app/api/session` + `app/api/chat` run server-side, mint a
 Google-signed ID token for the orchestrator's audience, and forward the
 request with the token attached.
 
@@ -22,22 +19,50 @@ This means:
 - No CORS to fight — the browser only sees its own origin.
 - The orchestrator only ever sees traffic from the Next.js service account.
 
+`app/api/banner` is a different case — it doesn't call the orchestrator at
+all, so it has no ID-token auth. It calls Google's Gemini image API directly
+with a plain API key (`GEMINI_API_KEY`), same as any external API call a
+Next.js server route might make. It's designed to fail soft: no key, a quota
+error, an empty response — all of them return `{ image: null }` rather than
+an error, so a decorative feature can never break the actual product.
+
 ## What's in this folder
 
 ```
 web/
 ├── app/
+│   ├── page.tsx                 The chat page — layout, state, scroll behaviour
+│   ├── layout.tsx                Root layout, metadata, GA4 script, theme bootstrap
+│   ├── globals.css               Tailwind base + custom animations
+│   ├── opengraph-image.tsx       Dynamically generated OG share image
 │   └── api/
-│       ├── session/route.ts    Session create + fetch (POST + GET)
-│       └── chat/route.ts       Streaming chat (POST /run_sse)
-├── package.json                pinned Node engine, scripts wired for Cloud Run
-└── .env.local.example          template for local dev
+│       ├── session/route.ts      Session create + fetch (POST + GET)
+│       ├── chat/route.ts         Streaming chat (POST /run_sse)
+│       └── banner/route.ts       Optional report banner illustration (POST)
+├── components/
+│   ├── Chat.tsx                  SSE parsing, session self-healing, /demo accelerator,
+│   │                             banner request/wait logic, GA4 event tracking
+│   ├── Message.tsx               Renders a single chat message (markdown-aware)
+│   ├── SalaryTable.tsx           Role / % / low / mid / high table from the JSON block
+│   ├── SalaryChart.tsx           Recharts visualisation of the same data
+│   ├── Header.tsx                Mobile ring vs desktop progress bar
+│   ├── Backdrop.tsx               Canvas backdrop
+│   ├── VideoBackdrop.tsx         Crossfading stock-footage backdrop
+│   ├── ThemeToggle.tsx           Light/dark toggle
+│   ├── ThinkingPill.tsx          "Thinking…" indicator during tool calls
+│   └── BannerLoading.tsx         Rotating loading messages while the banner generates
+├── lib/
+│   ├── types.ts                  Shared TS types for the report JSON shape
+│   ├── parseResult.ts            Extracts the fenced JSON block from streamed text,
+│   │                             weightedAverages() for multi-role/location reports
+│   ├── csv.ts                    CSV export
+│   ├── report.ts                 buildReportHtml() / downloadReport() — the HTML report
+│   ├── session.ts                localStorage-backed userId/sessionId persistence
+│   └── analytics.ts              trackEvent() wrapper around gtag.js
+├── public/videos/                Stock footage for the backdrop (Mixkit, free-licence)
+├── package.json                  pinned Node engine, scripts wired for Cloud Run
+└── .env.local.example            template for local dev
 ```
-
-You add: the UI (pages, components, styling). Recommended stack — React + a
-lightweight state library, EventSource for SSE, and a small parser that
-watches for a fenced JSON block in the streamed assistant messages and
-renders the salary table.
 
 ## Prerequisites
 
@@ -81,7 +106,11 @@ gcloud run services add-iam-policy-binding salary-orchestrator \
 
 ```bash
 cp .env.local.example .env.local
-# edit .env.local — set AGENT_SERVICE_URL to your orchestrator's URL
+# edit .env.local — set AGENT_SERVICE_URL to your orchestrator's URL.
+# GEMINI_API_KEY, NEXT_PUBLIC_SITE_URL, and NEXT_PUBLIC_GA_MEASUREMENT_ID
+# are all optional — leave any of them unset and that feature (banner
+# illustration, OG share image, analytics) is simply off. Nothing else
+# is affected.
 npm install
 npm run dev
 ```
@@ -117,6 +146,11 @@ gcloud run deploy salary-web \
   --allow-unauthenticated \
   --service-account=salary-web-sa@YOUR_PROJECT_ID.iam.gserviceaccount.com \
   --set-env-vars=AGENT_SERVICE_URL=$AGENT_URL,AGENT_APP_NAME=orchestrator
+
+# Optional extras, added the same way any time after the first deploy:
+gcloud run services update salary-web \
+  --region=YOUR_REGION \
+  --update-env-vars=GEMINI_API_KEY=YOUR_KEY,NEXT_PUBLIC_SITE_URL=YOUR_DEPLOYED_URL,NEXT_PUBLIC_GA_MEASUREMENT_ID=G-YOUR_ID
 ```
 
 The build uses Google Cloud Buildpacks, which reads `package.json` and runs
@@ -143,7 +177,7 @@ handle it correctly — using `client.request(...)` from
 and attaching it to an `undici` request so the SSE stream survives long
 silent waits.
 
-## The two routes, explained
+## The three API routes, explained
 
 ### `session/route.ts` — create + fetch ADK sessions
 
@@ -176,23 +210,42 @@ easily while the BigQuery data agent is thinking. So this route:
   SSE frames itself. This preserves ADK tool-call events without needing
   to know their shape.
 
-## What the frontend needs to do
+### `banner/route.ts` — optional report illustration
 
-Build to taste. The essentials:
+Takes the finished report's roles and location, builds a prompt for the
+dominant role, and calls `gemini-2.5-flash-image` directly with
+`GEMINI_API_KEY`. No orchestrator involved, no ID token — this is a
+plain server-side API call, the simplest of the three routes.
 
-- POST `/api/session` with a persistent per-browser `userId` (a UUID in
-  `localStorage` is fine). Save the returned `sessionId`.
-- For each user message, POST `/api/chat` with `{ userId, sessionId,
-  message }` and treat the response as an SSE stream. Show the streamed
-  tokens as they arrive.
-- Watch for a fenced JSON block whose payload has a `roles` array.
-  When you see one, render a salary table (Role, %, Low, Mid, High) and
-  offer a CSV download built from the same JSON.
-- Show a "thinking…" pill during `function_call` events. Don't display the
-  raw tool names — this is a public UI, not a debugger.
-- Add a footer: *"Estimates for negotiation preparation, not financial advice."*
+Notable choices:
+- Every failure path — no key configured, a bad request, a non-2xx from
+  Gemini, a response with no image data, a thrown exception — returns
+  `{ image: null, reason: "..." }` with a normal 200, never an error
+  status. The frontend's job is just: got an image, show it; didn't,
+  don't. A decorative feature should never be able to break report
+  generation.
+- `gemini-2.5-flash-image` (and image models generally) had **no free
+  tier** as of writing — a key with no billing account linked 429s on the
+  very first call, not after some quota is used up. See
+  [`docs/troubleshooting.md`](../docs/troubleshooting.md) if this bites you.
+- The prompt explicitly asks for no text/numbers/logos in the image —
+  image models otherwise like to render garbled text into illustrations,
+  which reads as broken rather than stylistic.
 
-The strict rule: **never modify the numbers**. Currency, range values,
-percentages — render exactly what the JSON says. The agent's guarantee is
-that every figure traces to a BigQuery row. Rewriting them locally breaks
-that guarantee.
+## How the chat UI works
+
+`components/Chat.tsx` is the core: it POSTs to `/api/session` once per
+browser (persisting `userId`/`sessionId` via `lib/session.ts`), then for
+each turn POSTs to `/api/chat` and reads the SSE stream. Partial-token
+events are buffered separately from the final aggregate event so text
+never doubles. Once a streamed message contains a complete fenced JSON
+block, `lib/parseResult.ts` extracts it, `SalaryTable.tsx`/`SalaryChart.tsx`
+render it, and the user can download a CSV (`lib/csv.ts`) or a styled HTML
+report (`lib/report.ts`). If a stale session 404s (e.g. after a redeploy —
+ADK sessions are in-memory and don't survive restarts), `Chat.tsx`
+transparently creates a fresh session and replays the last message once.
+
+The strict rule the whole UI honours: **never modify the numbers**.
+Currency, range values, percentages — render exactly what the JSON says.
+The agent's guarantee is that every figure traces to a BigQuery row.
+Rewriting them locally breaks that guarantee.

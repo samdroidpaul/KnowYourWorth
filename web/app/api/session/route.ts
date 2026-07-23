@@ -16,8 +16,8 @@ function env() {
 }
 
 // One auth instance for the lifetime of the module. The audience is the
-// orchestrator's base URL (no path). Cloud Run's IAM proxy validates the
-// `aud` claim against exactly this value.
+// orchestrator's base URL (no path). Cloud Run's IAM proxy validates the `aud`
+// claim against exactly this value.
 const auth = new GoogleAuth();
 let clientPromise: ReturnType<GoogleAuth["getIdTokenClient"]> | null = null;
 function getClient() {
@@ -112,10 +112,7 @@ export async function POST(req: NextRequest) {
     const upstream = await client.request<string>({
       url,
       method: "POST",
-      headers: {
-        "content-type": "application/json",
-        accept: "application/json",
-      },
+      headers: { "content-type": "application/json", accept: "application/json" },
       data: "{}",
       responseType: "text",
       validateStatus: () => true,

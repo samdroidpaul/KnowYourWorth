@@ -184,6 +184,11 @@ gcloud run services update salary-orchestrator \
   --region=YOUR_REGION \
   --update-env-vars DATA_AGENT_ID=NEW_ID
 
+# Turn on the optional Model Armor safety layer without a redeploy
+gcloud run services update salary-orchestrator \
+  --region=YOUR_REGION \
+  --update-env-vars=MODEL_ARMOR_TEMPLATE=YOUR_TEMPLATE_ID,MODEL_ARMOR_LOCATION=YOUR_MODEL_ARMOR_REGION
+
 # Tune scaling / cost caps (min 1 removes cold starts; max caps burst spend)
 gcloud run services update salary-orchestrator \
   --region=YOUR_REGION \
@@ -212,8 +217,8 @@ Full docstrings live in `tools.py`. Quick summary:
 
 | Tool                     | Purpose                                                     |
 |--------------------------|-------------------------------------------------------------|
-| `query_salary_knowledge` | Ask the data agent anything. All facts come through here.   |
-| `get_role_examples`      | Cached seed list of common items for the "unsure" case.     |
+| `query_salary_knowledge` | Ask the data agent anything. All facts come through here. Every call is also written to Firestore's `audit_log` (question asked, answer received), keyed to the session — see `docs/architecture.md`. |
+| `get_role_examples`      | Cached seed list of common items for the "unsure" case. Also logged to `audit_log`, cached or not. |
 | `note_person`            | Save a learned fact into per-person working memory.         |
 | `recall_person`          | Read back what's been gathered for a person.                |
 | `list_people`            | List everyone being compiled in this conversation.          |
@@ -227,8 +232,28 @@ Full docstrings live in `tools.py`. Quick summary:
 - `thinking_config(thinking_budget=0)` disables the model's internal
   "thinking" tokens. Roughly halves latency and per-turn cost. Fine for an
   interview workload; enable it if you switch to a reasoning-heavy task.
-- `max_output_tokens=1024` caps each response. The final JSON block is
-  small; long prose responses are a sign the model is off-piste.
+- `max_output_tokens=2048` caps each response. The final turn carries both
+  the JSON block and a short summary — 1024 was tight enough that a large
+  multi-role report could get its summary cut off mid-sentence; 2048 gives
+  headroom without materially changing cost, since interview turns are far
+  shorter than the final one.
+- The system instruction batches interview questions by topic rather than
+  asking one fact at a time — measured on the hardest real persona (an
+  8-role, multi-location week), this cut a 7-turn interview to 1, with the
+  same information gathered. See `eval/run_eval.py` at the repo root for
+  the harness that measures this — run it before trusting a prompt change,
+  not just after.
+
+## Optional: Model Armor content-safety layer
+
+`model_armor.py` wires `before_model_callback` / `after_model_callback` onto
+the root agent — screens every genuine user turn and every completed model
+response for prompt injection, jailbreak attempts, and harmful content.
+Entirely optional: leave `MODEL_ARMOR_TEMPLATE` unset and both callbacks
+no-op immediately, at zero cost. Fails open on any error (misconfigured
+template, quota, outage) rather than breaking the conversation. Full setup,
+a real region gotcha we hit standing this up, and how a block wires into
+alerting: [`docs/model-armor-monitoring.md`](../docs/model-armor-monitoring.md).
 
 ## Next
 
